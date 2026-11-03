@@ -206,7 +206,7 @@ def test_dashboard_loads_with_stage_one_state():
     assert "Disconnected" in response.text
     assert 'id="fixed-kampala-clock"' in response.text
     assert 'id="fixed-kampala-time"' in response.text
-    assert 'dashboard.js?v=stage-4-6b' in response.text
+    assert 'dashboard.js?v=stage-4-6b-2' in response.text
 
 
 def test_fixed_clock_uses_kampala_timezone_and_updates_independently():

@@ -449,6 +449,7 @@ function connectDashboardStream() {
     stream.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === "tick") applyTick(data);
+        else if (data.type === "status") setConnectionState(data);
         else applyMarketData(data);
     };
     stream.onerror = () => setWebSocketState("disconnected", "Stream error");

@@ -288,3 +288,4 @@ def test_frontend_signal_presentation_uses_kampala_and_backend_signal_fields():
     assert "signal-evidence-button" in javascript
     assert "Historical evidence unavailable" in javascript
     assert 'id="signal-evidence-content"' in template
+    assert 'else if (data.type === "status") setConnectionState(data);' in javascript
