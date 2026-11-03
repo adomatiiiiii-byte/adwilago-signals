@@ -46,6 +46,9 @@ M5_SECONDS = 5 * 60
 MAX_RECONNECT_DELAY_SECONDS = 30.0
 REST_STALE_SECONDS = 180.0
 TICK_STALE_SECONDS = 30.0
+SESSION_REFRESH_SECONDS = 15 * 60
+WEBSOCKET_PING_INTERVAL_SECONDS = 20.0
+WEBSOCKET_PING_TIMEOUT_SECONDS = 10.0
 
 
 class ExnessError(Exception):
@@ -66,6 +69,18 @@ class ExnessAuthenticationError(ExnessError):
 
 class ExnessMarketDataError(ExnessError):
     """The API returned an invalid or unusable market-data response."""
+
+
+class ExnessMarketClosedError(ExnessError):
+    """Exness explicitly reported that the instrument session is closed."""
+
+
+@dataclass(frozen=True)
+class InstrumentTradeSession:
+    """A weekly UTC instrument session represented as seconds since Monday."""
+
+    start_second: int
+    end_second: int
 
 
 @dataclass(frozen=True)
@@ -216,6 +231,12 @@ class ExnessMarketDataService:
         self._access_point: str | None = None
         self._instruments: tuple[str, ...] | None = None
         self._account_verified = False
+        self._trade_sessions: tuple[InstrumentTradeSession, ...] = ()
+        self._trade_mode: str | None = None
+        self._session_information_loaded_at: datetime | None = None
+        self._session_information_available = False
+        self._session_error: str | None = None
+        self._session_override: str | None = None
         self._latest_tick: dict[str, Any] | None = None
         self._latest_tick_received_at: datetime | None = None
         self._stream_task: asyncio.Task[None] | None = None
@@ -225,8 +246,14 @@ class ExnessMarketDataService:
         self._rest_status = "disconnected"
         self._rest_error: str | None = None
         self._websocket_status = "disconnected"
+        self._websocket_activity = "disconnected"
+        self._current_connection_received_tick = False
         self._websocket_error: str | None = None
         self._last_successful_update: datetime | None = None
+        self._last_reconciliation_new_completed_candle: bool | None = None
+        self._last_new_completed_candle_at: datetime | None = None
+        self._recent_missing_intervals: list[dict[str, Any]] = []
+        self._recent_gap_state: str | None = None
         self._dashboard_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._refresh_lock = asyncio.Lock()
         self._strategy_lock = asyncio.Lock()
@@ -298,6 +325,11 @@ class ExnessMarketDataService:
                     "USDJPY was not found for this account.",
                     status_code=response.status_code,
                 )
+            if code in {4001, 4002, 4003}:
+                raise ExnessMarketClosedError(
+                    "Exness reported that the USDJPY market session is closed.",
+                    status_code=response.status_code,
+                )
             raise ExnessError(
                 "Exness API request failed.",
                 status_code=response.status_code,
@@ -339,20 +371,120 @@ class ExnessMarketDataService:
             raise ExnessMarketDataError("USDJPY is not available for this account.")
         return self._instruments
 
+    @staticmethod
+    def _parse_week_time(value: Any) -> int:
+        if not isinstance(value, str):
+            raise ValueError("missing weekly session time")
+        day_name, clock = value.split(",", 1)
+        day = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}[day_name.strip()]
+        hour, minute, second = (int(part) for part in clock.strip().split(":"))
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59 or not 0 <= second <= 59:
+            raise ValueError("invalid weekly session time")
+        return day * 86400 + hour * 3600 + minute * 60 + second
+
+    @classmethod
+    def _parse_trade_sessions(cls, payload: Any) -> tuple[str, tuple[InstrumentTradeSession, ...]]:
+        if not isinstance(payload, dict):
+            raise ValueError("invalid instrument conditions response")
+        trade_mode = payload.get("trade_mode")
+        if trade_mode not in {"enabled", "trading_disabled"}:
+            raise ValueError("invalid instrument trade mode")
+        raw_sessions = payload.get("trade_sessions")
+        if not isinstance(raw_sessions, list) or not raw_sessions:
+            raise ValueError("instrument conditions contain no trade sessions")
+        sessions: list[InstrumentTradeSession] = []
+        for raw_session in raw_sessions:
+            if not isinstance(raw_session, dict):
+                raise ValueError("invalid instrument trade session")
+            if raw_session.get("trade_mode", trade_mode) != "enabled":
+                continue
+            start = cls._parse_week_time(raw_session.get("week_start_time"))
+            end = cls._parse_week_time(raw_session.get("week_end_time"))
+            sessions.append(InstrumentTradeSession(start, end))
+        if not sessions:
+            raise ValueError("instrument conditions contain no enabled sessions")
+        return trade_mode, tuple(sessions)
+
+    async def _refresh_instrument_conditions(self) -> None:
+        now = datetime.now(UTC)
+        if (
+            self._session_information_loaded_at is not None
+            and (now - self._session_information_loaded_at).total_seconds() < SESSION_REFRESH_SECONDS
+        ):
+            return
+
+        self._session_information_loaded_at = now
+        self._session_override = None
+        try:
+            access_point = await self.discover_access_point()
+            payload = await self._get(
+                access_point,
+                f"/v1/configuration/accounts/{self.config.account_id}/instruments/{MARKET}/conditions",
+            )
+            trade_mode, sessions = self._parse_trade_sessions(payload)
+        except ExnessMarketClosedError:
+            self._trade_mode = "trading_disabled"
+            self._trade_sessions = ()
+            self._session_information_available = True
+            self._session_error = None
+            self._session_override = "closed"
+            return
+        except (ExnessError, ValueError):
+            self._trade_mode = None
+            self._trade_sessions = ()
+            self._session_information_available = False
+            self._session_error = "Exness instrument session information is unavailable."
+            return
+
+        self._trade_mode = trade_mode
+        self._trade_sessions = sessions
+        self._session_information_available = True
+        self._session_error = None
+
+    def _session_state_at(self, timestamp: datetime) -> str:
+        if self._session_override == "closed":
+            return "closed"
+        if not self._session_information_available or self._trade_mode is None:
+            return "unknown"
+        if self._trade_mode != "enabled":
+            return "closed"
+        current = timestamp.astimezone(UTC)
+        second_of_week = (
+            current.weekday() * 86400
+            + current.hour * 3600
+            + current.minute * 60
+            + current.second
+        )
+        for session in self._trade_sessions:
+            if session.start_second <= session.end_second:
+                if session.start_second <= second_of_week <= session.end_second:
+                    return "open"
+            elif second_of_week >= session.start_second or second_of_week <= session.end_second:
+                return "open"
+        return "closed"
+
+    def _current_session_state(self, now: datetime | None = None) -> str:
+        return self._session_state_at(now or datetime.now(UTC))
+
     async def _request_candles(self, count: int, start: datetime) -> list[Candle]:
         access_point = await self.discover_access_point()
         await self.verify_account_and_instruments()
-        payload = await self._get(
-            access_point,
-            f"/v1/market-data/accounts/{self.config.account_id}/candles",
-            {
-                "instrument": MARKET,
-                "price_type": "bid",
-                "timeframe": TIMEFRAME,
-                "from": start.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-                "count": count,
-            },
-        )
+        await self._refresh_instrument_conditions()
+        try:
+            payload = await self._get(
+                access_point,
+                f"/v1/market-data/accounts/{self.config.account_id}/candles",
+                {
+                    "instrument": MARKET,
+                    "price_type": "bid",
+                    "timeframe": TIMEFRAME,
+                    "from": start.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "count": count,
+                },
+            )
+        except ExnessMarketClosedError:
+            self._session_override = "closed"
+            raise
         return parse_candles(payload)
 
     def _merge_candles(self, candles: list[Candle]) -> None:
@@ -363,8 +495,69 @@ class ExnessMarketDataService:
         cutoff = datetime.now(UTC).timestamp() - M5_SECONDS
         return [candle for timestamp, candle in sorted(self._candles.items()) if timestamp <= cutoff]
 
+    @staticmethod
+    def _timestamp_text(timestamp: datetime) -> str:
+        return timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+    def _record_candle_reconciliation(
+        self,
+        completed_before: set[datetime],
+        completed_after: set[datetime],
+    ) -> None:
+        """Record sequence advancement without treating the initial history as live data."""
+        newly_completed = sorted(completed_after - completed_before)
+        self._last_reconciliation_new_completed_candle = bool(newly_completed)
+        if newly_completed:
+            self._last_new_completed_candle_at = datetime.now(UTC)
+
+        previous_latest = max(completed_before) if completed_before else None
+        if previous_latest is None:
+            self._recent_missing_intervals = []
+            self._recent_gap_state = None
+            return
+        if not newly_completed:
+            return
+
+        missing: list[dict[str, Any]] = []
+        sequence_previous = previous_latest
+        for timestamp in newly_completed:
+            if timestamp <= sequence_previous:
+                continue
+            delta_seconds = (timestamp - sequence_previous).total_seconds()
+            if delta_seconds > M5_SECONDS:
+                missing_open_times = [
+                    sequence_previous + timedelta(seconds=M5_SECONDS * index)
+                    for index in range(1, int(delta_seconds // M5_SECONDS))
+                ]
+                interval_states = [self._session_state_at(value) for value in missing_open_times]
+                if "open" in interval_states:
+                    gap_state = "gap_detected"
+                elif interval_states and all(state == "closed" for state in interval_states):
+                    gap_state = "market_closed"
+                else:
+                    gap_state = "unknown"
+                missing.append({
+                    "start_open_time": self._timestamp_text(missing_open_times[0]),
+                    "end_open_time": self._timestamp_text(missing_open_times[-1]),
+                    "count": len(missing_open_times),
+                    "session_state": gap_state,
+                })
+            sequence_previous = timestamp
+
+        self._recent_missing_intervals = missing
+        if missing:
+            states = {item["session_state"] for item in missing}
+            self._recent_gap_state = (
+                "gap_detected" if "gap_detected" in states
+                else "unknown" if "unknown" in states
+                else "market_closed"
+            )
+        else:
+            self._recent_gap_state = None
+
     async def load_initial_candles(self) -> list[Candle]:
         self._rest_status = "connecting"
+        completed_before = {candle.timestamp for candle in self._completed_candles()}
         candles = await self._request_candles(
             HISTORY_COUNT,
             datetime.now(UTC) - timedelta(seconds=M5_SECONDS * HISTORY_COUNT + M5_SECONDS),
@@ -374,6 +567,8 @@ class ExnessMarketDataService:
         self._rest_status = "connected"
         self._rest_error = None
         self._last_successful_update = datetime.now(UTC)
+        completed_after = {candle.timestamp for candle in self._completed_candles()}
+        self._record_candle_reconciliation(completed_before, completed_after)
         await self._evaluate_completed_candles()
         return self._completed_candles()
 
@@ -481,12 +676,15 @@ class ExnessMarketDataService:
     async def reconcile_candles(self) -> list[Candle]:
         if not self._candles_loaded:
             return await self.load_initial_candles()
+        completed_before = {candle.timestamp for candle in self._completed_candles()}
         latest = max(self._candles.values(), key=lambda candle: candle.timestamp)
         candles = await self._request_candles(5, latest.timestamp)
         self._merge_candles(candles)
         self._rest_status = "connected"
         self._rest_error = None
         self._last_successful_update = datetime.now(UTC)
+        completed_after = {candle.timestamp for candle in self._completed_candles()}
+        self._record_candle_reconciliation(completed_before, completed_after)
         await self._evaluate_completed_candles()
         await self._publish(self._dashboard_snapshot())
         return self._completed_candles()
@@ -545,7 +743,131 @@ class ExnessMarketDataService:
             "rest_error": self._rest_error,
             "websocket_error": self._websocket_error,
             "error": self._rest_error,
+            "health": self.get_health_snapshot(now=now),
             **self.get_signal_snapshot(),
+        }
+
+    def get_health_snapshot(self, now: datetime | None = None) -> dict[str, Any]:
+        """Return an in-memory health projection without refreshing or evaluating data."""
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        latest_completed = self._completed_candles()[-1] if self._completed_candles() else None
+        rest_age = (
+            (current_time - self._last_successful_update).total_seconds()
+            if self._last_successful_update
+            else None
+        )
+        tick_age = (
+            (current_time - self._latest_tick_received_at).total_seconds()
+            if self._latest_tick_received_at
+            else None
+        )
+        candle_age = None
+        if latest_completed is not None:
+            candle_close = latest_completed.timestamp + timedelta(seconds=M5_SECONDS)
+            candle_age = max(0.0, (current_time - candle_close).total_seconds())
+
+        session_state = self._current_session_state(current_time)
+
+        rest_is_fresh = (
+            self._rest_status == "connected"
+            and rest_age is not None
+            and rest_age <= REST_STALE_SECONDS
+        )
+        candle_is_fresh = (
+            latest_completed is not None
+            and candle_age is not None
+            and candle_age <= M5_SECONDS + REST_STALE_SECONDS
+        )
+        websocket_active = (
+            self._websocket_status == "connected"
+            and tick_age is not None
+            and tick_age <= TICK_STALE_SECONDS
+        )
+        if self._websocket_status == "connected":
+            if self._websocket_activity == "awaiting_first_tick":
+                websocket_activity = "awaiting_first_tick"
+            elif self._websocket_activity == "silent" or not websocket_active:
+                websocket_activity = "silent"
+            else:
+                websocket_activity = "active"
+        elif self._websocket_status == "connecting":
+            websocket_activity = "connecting"
+        elif self._websocket_status == "reconnecting":
+            websocket_activity = "reconnecting"
+        else:
+            websocket_activity = "disconnected"
+
+        if not self._candles_loaded or self._rest_status in {"disconnected", "error"}:
+            overall = "unavailable" if latest_completed is None else "stale"
+        elif not rest_is_fresh or not candle_is_fresh:
+            overall = "stale"
+        elif not websocket_active:
+            overall = "degraded"
+        else:
+            overall = "healthy"
+
+        if self._recent_gap_state is not None:
+            candle_sequence_state = self._recent_gap_state
+        elif session_state == "closed":
+            candle_sequence_state = "market_closed"
+        elif latest_completed is None:
+            candle_sequence_state = "unknown"
+        elif session_state == "unknown" and not candle_is_fresh:
+            candle_sequence_state = "unknown"
+        elif not candle_is_fresh:
+            candle_sequence_state = "delayed"
+        else:
+            candle_sequence_state = "healthy"
+
+        return {
+            "overall_state": overall,
+            "rest_status": self._rest_status,
+            "last_successful_rest_request": (
+                self._last_successful_update.isoformat().replace("+00:00", "Z")
+                if self._last_successful_update
+                else None
+            ),
+            "rest_age_seconds": rest_age,
+            "websocket_status": self._websocket_status,
+            "websocket_activity": websocket_activity,
+            "last_valid_tick_timestamp": (
+                self._latest_tick.get("timestamp") if self._latest_tick else None
+            ),
+            "last_valid_tick_received_at": (
+                self._latest_tick_received_at.isoformat().replace("+00:00", "Z")
+                if self._latest_tick_received_at
+                else None
+            ),
+            "tick_age_seconds": tick_age,
+            "latest_completed_candle_timestamp": (
+                latest_completed.timestamp.isoformat().replace("+00:00", "Z")
+                if latest_completed
+                else None
+            ),
+            "latest_completed_candle_open_time": (
+                self._timestamp_text(latest_completed.timestamp) if latest_completed else None
+            ),
+            "latest_completed_candle_close_time": (
+                self._timestamp_text(latest_completed.timestamp + timedelta(seconds=M5_SECONDS))
+                if latest_completed else None
+            ),
+            "latest_completed_candle_age_seconds": candle_age,
+            "latest_reconciliation_new_completed_candle": self._last_reconciliation_new_completed_candle,
+            "last_new_completed_candle_at": (
+                self._timestamp_text(self._last_new_completed_candle_at)
+                if self._last_new_completed_candle_at else None
+            ),
+            "candle_sequence_state": candle_sequence_state,
+            "session_state": session_state,
+            "trade_mode": self._trade_mode,
+            "session_information_available": self._session_information_available,
+            "gap_detected": self._recent_gap_state == "gap_detected",
+            "missing_intervals": list(self._recent_missing_intervals),
+            "rest_freshness": "fresh" if rest_is_fresh else "stale",
+            "candle_freshness": "fresh" if candle_is_fresh else "stale",
+            "websocket_error": self._websocket_error,
+            "rest_error": self._rest_error,
+            "session_error": self._session_error,
         }
 
     async def refresh_market_data(self) -> dict[str, Any]:
@@ -620,6 +942,7 @@ class ExnessMarketDataService:
         while not self._closing:
             try:
                 self._websocket_status = "connecting"
+                self._websocket_activity = "connecting"
                 self._websocket_error = None
                 await self._publish(self._dashboard_snapshot())
                 access_point = await self.discover_access_point()
@@ -630,15 +953,40 @@ class ExnessMarketDataService:
                     ws_url,
                     additional_headers=headers,
                     subprotocols=["exness-ws-protocol"],
+                    ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,
+                    ping_timeout=WEBSOCKET_PING_TIMEOUT_SECONDS,
                 ) as websocket:
                     await websocket.send(json.dumps({
                         "id": "adwilago-usdjpy-ticks",
                         "subscribe": {"event": "ticks", "instruments": [MARKET]},
                     }))
                     self._websocket_status = "connected"
+                    self._websocket_activity = "awaiting_first_tick"
+                    self._current_connection_received_tick = False
                     delay = self._reconnect_base_seconds
                     await self._publish(self._dashboard_snapshot())
-                    async for raw_message in websocket:
+                    message_iterator = websocket.__aiter__()
+                    while True:
+                        try:
+                            raw_message = await asyncio.wait_for(
+                                message_iterator.__anext__(),
+                                timeout=TICK_STALE_SECONDS,
+                            )
+                        except StopAsyncIteration:
+                            self._websocket_status = "disconnected"
+                            self._websocket_activity = "disconnected"
+                            self._websocket_error = "Exness tick stream closed normally."
+                            await self._publish(self._dashboard_snapshot())
+                            break
+                        except asyncio.TimeoutError:
+                            # Do not reconnect solely because the market is quiet. The
+                            # WebSocket transport has its own ping/pong watchdog, while
+                            # this timeout updates data-activity health only.
+                            if self._websocket_activity != "silent":
+                                self._websocket_activity = "silent" if self._current_connection_received_tick else "awaiting_first_tick"
+                                self._websocket_error = "No recent valid USDJPY tick received."
+                                await self._publish(self._dashboard_snapshot())
+                            continue
                         message = json.loads(raw_message)
                         if message.get("instrument") != MARKET:
                             continue
@@ -650,16 +998,31 @@ class ExnessMarketDataService:
                             "timestamp": message.get("timestamp") or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                         }
                         self._latest_tick_received_at = datetime.now(UTC)
-                        await self._publish({"type": "tick", **self._latest_tick, "websocket_status": "connected"})
+                        self._websocket_activity = "active"
+                        self._current_connection_received_tick = True
+                        self._websocket_error = None
+                        delay = self._reconnect_base_seconds
+                        await self._publish({"type": "tick", **self._latest_tick, "websocket_status": "connected", "websocket_activity": "active"})
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self._websocket_status = "disconnected"
+                self._websocket_activity = "disconnected"
                 self._websocket_error = "Exness tick stream disconnected."
                 await self._publish(self._dashboard_snapshot())
             if not self._closing:
+                self._websocket_status = "reconnecting"
+                self._websocket_activity = "reconnecting"
+                await self._publish(self._dashboard_snapshot())
                 await self._sleep(delay)
+                if self._closing:
+                    self._websocket_status = "disconnected"
+                    self._websocket_activity = "disconnected"
+                    break
                 delay = min(max(delay * 2, self._reconnect_base_seconds), self._reconnect_max_seconds)
+            else:
+                self._websocket_status = "disconnected"
+                self._websocket_activity = "disconnected"
 
     async def close(self) -> None:
         self._closing = True
