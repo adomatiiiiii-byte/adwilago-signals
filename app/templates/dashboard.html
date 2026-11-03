@@ -78,6 +78,11 @@
                 </div>
             </section>
 
+            <section class="panel today-signals-panel" id="today-signals">
+                <div class="panel-heading"><div><p class="eyebrow">Kampala trading session</p><h3>TODAY'S SIGNALS | 07:00 AM – 06:00 PM</h3></div><span id="today-signals-count" class="badge badge-neutral">0 signals</span></div>
+                <div class="table-wrap"><table><thead><tr><th>Direction</th><th>Signal timestamp</th><th>Market</th><th>Timeframe</th><th>Strategy</th><th>Signal price</th></tr></thead><tbody id="today-signals-body"><tr><td colspan="6" class="empty-table"><span>⌁</span><strong>No signals in today's session</strong><small>Qualifying signals will appear here from 07:00 AM to 06:00 PM Kampala time.</small></td></tr></tbody></table></div>
+            </section>
+
             <section class="panel chart-panel">
                 <div class="panel-heading"><div><p class="eyebrow">Price action</p><h3>USDJPY chart</h3></div><span id="chart-badge" class="badge badge-neutral">Waiting for data</span></div>
                 <div id="chart-disclaimer" class="chart-disclaimer">Waiting for genuine Exness market data</div>
@@ -114,6 +119,6 @@
         <span>EAT · KAMPALA</span>
         <strong id="fixed-kampala-time">--:--:--</strong>
     </div>
-    <script src="{{ url_for('static', path='js/dashboard.js') }}"></script>
+    <script src="{{ url_for('static', path='js/dashboard.js') }}?v=stage-4-5"></script>
 </body>
 </html>

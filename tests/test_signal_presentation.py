@@ -89,6 +89,51 @@ def test_signal_history_is_newest_first(tmp_path):
     ]
 
 
+def test_today_session_uses_inclusive_open_and_exclusive_close_boundaries(tmp_path):
+    repository = isolated_repository(tmp_path)
+    timestamps = [
+        datetime(2026, 11, 3, 3, 59, 59, tzinfo=UTC),  # 06:59:59 Kampala
+        datetime(2026, 11, 3, 4, 0, 0, tzinfo=UTC),  # 07:00:00 Kampala
+        datetime(2026, 11, 3, 14, 59, 59, tzinfo=UTC),  # 17:59:59 Kampala
+        datetime(2026, 11, 3, 15, 0, 0, tzinfo=UTC),  # 18:00:00 Kampala
+    ]
+    for timestamp in timestamps:
+        repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bullish", timestamp))
+
+    signals = repository.list_today_session(now=datetime(2026, 11, 3, 12, 0, tzinfo=UTC))
+
+    assert [item["candle_timestamp"] for item in signals] == [
+        "2026-11-03T14:59:59Z",
+        "2026-11-03T04:00:00Z",
+    ]
+
+
+def test_today_session_resets_by_kampala_calendar_date_without_deleting_history(tmp_path):
+    repository = isolated_repository(tmp_path)
+    yesterday = datetime(2026, 11, 2, 4, 0, tzinfo=UTC)
+    after_midnight = datetime(2026, 11, 3, 1, 0, tzinfo=UTC)  # 04:00 Kampala on Nov 3
+    today = datetime(2026, 11, 3, 4, 0, tzinfo=UTC)
+    repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bullish", yesterday))
+
+    assert repository.list_today_session(now=after_midnight) == []
+    repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bearish", today))
+    assert [item["candle_timestamp"] for item in repository.list_today_session(now=datetime(2026, 11, 3, 12, 0, tzinfo=UTC))] == [
+        "2026-11-03T04:00:00Z"
+    ]
+    assert len(repository.list_recent()) == 2
+
+
+def test_signal_near_midnight_uses_kampala_date_not_utc_date(tmp_path):
+    repository = isolated_repository(tmp_path)
+    just_after_kampala_midnight = datetime(2026, 11, 2, 21, 0, tzinfo=UTC)
+    repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bearish", just_after_kampala_midnight))
+
+    signals = repository.list_today_session(now=datetime(2026, 11, 3, 1, 0, tzinfo=UTC))
+
+    assert signals == []
+    assert repository.list_recent()[0]["candle_timestamp"] == "2026-11-02T21:00:00Z"
+
+
 def test_missing_optional_history_price_is_safe(tmp_path):
     repository = isolated_repository(tmp_path)
     repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bullish", BASE_TIME))
@@ -163,7 +208,13 @@ def test_frontend_signal_presentation_uses_kampala_and_backend_signal_fields():
     assert "function updateSignalPresentation(data)" in javascript
     assert "data.current_signal" in javascript
     assert "data.signal_history" in javascript
+    assert "data.today_signals" in javascript
     assert "formatTimestamp(signal.candle_timestamp)" in javascript
     assert "formatTimestamp(record.candle_timestamp)" in javascript
+    assert "function updateTodaysSignals(data)" in javascript
+    assert 'fetch("/api/signals"' in javascript
+    assert "setInterval(loadSignalData, 15000)" in javascript
     assert "NO ACTIVE SIGNAL" in template
+    assert "TODAY'S SIGNALS | 07:00 AM" in template
+    assert 'id="today-signals-body"' in template
     assert 'id="signal-history-body"' in template

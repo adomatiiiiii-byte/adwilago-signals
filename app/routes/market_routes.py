@@ -19,7 +19,11 @@ def configure_market_service(value: ExnessMarketDataService | None) -> None:
 def _signal_snapshot() -> dict:
     if service is not None:
         return service.get_signal_snapshot()
-    return {"current_signal": None, "signal_history": signal_repository.list_recent()}
+    return {
+        "current_signal": None,
+        "signal_history": signal_repository.list_recent(),
+        "today_signals": signal_repository.list_today_session(),
+    }
 
 
 @router.get("/api/market-data")

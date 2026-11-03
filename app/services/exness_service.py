@@ -451,11 +451,31 @@ class ExnessMarketDataService:
             history.append(item)
         return history
 
+    def _decorate_signal_records(self, records: list[dict[str, object]]) -> list[dict[str, Any]]:
+        """Add a matching cached candle close without changing persisted records."""
+        history: list[dict[str, Any]] = []
+        for record in records:
+            item = dict(record)
+            timestamp_value = str(item["candle_timestamp"])
+            try:
+                timestamp = datetime.fromisoformat(timestamp_value.replace("Z", "+00:00")).astimezone(UTC)
+                candle = self._candles.get(int(timestamp.timestamp()))
+            except (TypeError, ValueError, OverflowError):
+                candle = None
+            item["price"] = candle.close if candle is not None else None
+            history.append(item)
+        return history
+
     def get_signal_snapshot(self) -> dict[str, Any]:
         """Return current evaluated status and persisted history without refreshing data."""
+        if self._signal_repository is None:
+            return {"current_signal": self._current_signal, "signal_history": [], "today_signals": []}
+        list_recent = getattr(self._signal_repository, "list_recent", None)
+        list_today = getattr(self._signal_repository, "list_today_session", None)
         return {
             "current_signal": self._current_signal,
-            "signal_history": self._signal_history(),
+            "signal_history": self._signal_history() if callable(list_recent) else [],
+            "today_signals": self._decorate_signal_records(list_today()) if callable(list_today) else [],
         }
 
     async def reconcile_candles(self) -> list[Candle]:

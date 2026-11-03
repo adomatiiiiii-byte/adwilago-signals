@@ -196,6 +196,29 @@ function escapeHtml(value) {
         .replaceAll("'", "&#039;");
 }
 
+function updateTodaysSignals(data) {
+    const records = Array.isArray(data.today_signals) ? data.today_signals : [];
+    const body = document.getElementById("today-signals-body");
+    const count = document.getElementById("today-signals-count");
+    if (!body || !count) return;
+    count.textContent = `${records.length} signal${records.length === 1 ? "" : "s"}`;
+    if (records.length === 0) {
+        body.innerHTML = `<tr><td colspan="6" class="empty-table"><span>⌁</span><strong>No signals in today's session</strong><small>Qualifying signals will appear here from 07:00 AM to 06:00 PM Kampala time.</small></td></tr>`;
+        return;
+    }
+    body.innerHTML = records.map((record) => {
+        const bullish = record.direction === "bullish";
+        return `<tr class="signal-history-row ${bullish ? "row-bullish" : "row-bearish"}">
+            <td><span class="direction-label ${bullish ? "direction-bullish" : "direction-bearish"}">${escapeHtml(record.direction).toUpperCase()}</span></td>
+            <td>${escapeHtml(formatTimestamp(record.candle_timestamp))} Kampala</td>
+            <td>${escapeHtml(record.market)}</td>
+            <td>M5</td>
+            <td>${escapeHtml(record.strategy)}</td>
+            <td>${formatPrice(record.price)}</td>
+        </tr>`;
+    }).join("");
+}
+
 function updateSignalPresentation(data) {
     const signal = data.current_signal;
     const badge = document.getElementById("current-signal-badge");
@@ -207,6 +230,7 @@ function updateSignalPresentation(data) {
     const body = document.getElementById("signal-history-body");
     const count = document.getElementById("signal-history-count");
     if (!badge || !state || !icon || !title || !description || !details || !body || !count) return;
+    updateTodaysSignals(data);
 
     if (!signal) {
         badge.textContent = "No active signal";
@@ -324,6 +348,15 @@ async function loadMarketData() {
     }
 }
 
+async function loadSignalData() {
+    try {
+        const response = await fetch("/api/signals", { cache: "no-store" });
+        updateSignalPresentation(await response.json());
+    } catch (error) {
+        // Market-data updates remain the source of truth when this read-only poll is unavailable.
+    }
+}
+
 function connectDashboardStream() {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const stream = new WebSocket(`${protocol}://${window.location.host}/ws/market-data`);
@@ -343,5 +376,7 @@ function connectDashboardStream() {
 initializeClock();
 createChart();
 loadMarketData();
+loadSignalData();
 connectDashboardStream();
 setInterval(loadMarketData, 15000);
+setInterval(loadSignalData, 15000);
