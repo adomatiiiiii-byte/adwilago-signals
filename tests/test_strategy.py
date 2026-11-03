@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import sqlite3
 
 import pytest
 
@@ -9,6 +10,8 @@ from app.services.strategy_engine import (
     DayTradingEngulfingStrategy,
     StrategySignal,
 )
+from app.database import initialize_database
+import app.database as database_module
 
 
 PRIVATE_KEY_HEX = "00" * 32
@@ -42,6 +45,83 @@ def test_bullish_signal_requires_all_three_conditions():
     assert signal is not None
     assert signal.direction == "bullish"
     assert signal.candle_timestamp == candles[1].timestamp
+
+
+def evidence_repository(tmp_path, monkeypatch):
+    database_path = tmp_path / "signals.db"
+    monkeypatch.setattr(database_module, "DATABASE_PATH", database_path)
+    initialize_database()
+    return database_path, SignalRepository(database_path)
+
+
+def test_generated_signal_contains_exact_audit_evidence():
+    candles, indicators = pair()
+
+    signal = DayTradingEngulfingStrategy().evaluate(candles, indicators, 1, now=NOW)
+
+    assert signal is not None
+    assert signal.evidence is not None
+    assert signal.evidence.current_open == candles[1].open
+    assert signal.evidence.current_high == candles[1].high
+    assert signal.evidence.current_low == candles[1].low
+    assert signal.evidence.current_close == candles[1].close
+    assert signal.evidence.current_candle_timestamp == candles[1].timestamp
+    assert signal.evidence.previous_open == candles[0].open
+    assert signal.evidence.previous_high == candles[0].high
+    assert signal.evidence.previous_low == candles[0].low
+    assert signal.evidence.previous_close == candles[0].close
+    assert signal.evidence.previous_candle_timestamp == candles[0].timestamp
+    assert signal.evidence.previous_ma75 == 105.0
+    assert signal.evidence.previous_rsi7_raw == 39.994
+    assert signal.evidence.previous_rsi7_rounded == 39.99
+    assert (signal.evidence.condition_1_passed, signal.evidence.condition_2_passed, signal.evidence.condition_3_passed) == (True, True, True)
+    assert signal.evidence.evaluation_timestamp == NOW
+
+
+def test_signal_and_evidence_are_persisted_and_survive_repository_restart(tmp_path, monkeypatch):
+    database_path, repository = evidence_repository(tmp_path, monkeypatch)
+    candles, indicators = pair()
+    signal = DayTradingEngulfingStrategy().evaluate(candles, indicators, 1, now=NOW)
+
+    assert signal is not None
+    assert repository.insert(signal) is True
+    assert SignalRepository(database_path).insert(signal) is False
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT s.id, e.current_close, e.previous_ma75, e.previous_rsi7_raw, e.previous_rsi7_rounded, e.condition_1_passed, e.condition_2_passed, e.condition_3_passed, e.evaluation_timestamp FROM signals s JOIN signal_evidence e ON e.signal_id = s.id"
+        ).fetchone()
+        assert row == (1, 101.0, 105.0, 39.994, 39.99, 1, 1, 1, "2026-11-02T12:00:00Z")
+
+
+def test_bearish_signal_persists_directional_evidence(tmp_path, monkeypatch):
+    _, repository = evidence_repository(tmp_path, monkeypatch)
+    candles, indicators = pair(previous_ma=95.0, previous_rsi=60.006, current_open=90.0, current_close=99.0)
+    signal = DayTradingEngulfingStrategy().evaluate(candles, indicators, 1, now=NOW)
+
+    assert signal is not None
+    assert signal.direction == "bearish"
+    assert repository.insert(signal) is True
+    with sqlite3.connect(repository.database_path) as connection:
+        row = connection.execute(
+            "SELECT condition_1_passed, condition_2_passed, condition_3_passed, previous_rsi7_raw, previous_rsi7_rounded FROM signal_evidence"
+        ).fetchone()
+        assert row == (1, 1, 1, 60.006, 60.01)
+
+
+def test_evidence_failure_rolls_back_signal_insertion(tmp_path):
+    database_path = tmp_path / "signals.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, market TEXT NOT NULL, strategy TEXT NOT NULL, direction TEXT NOT NULL, candle_timestamp TEXT NOT NULL, status TEXT NOT NULL)")
+        connection.execute("CREATE UNIQUE INDEX ux_signals ON signals (market, strategy, candle_timestamp)")
+        connection.execute("CREATE TABLE signal_evidence (signal_id INTEGER PRIMARY KEY, current_open REAL NOT NULL)")
+    candles, indicators = pair()
+    signal = DayTradingEngulfingStrategy().evaluate(candles, indicators, 1, now=NOW)
+
+    assert signal is not None
+    with pytest.raises(sqlite3.OperationalError):
+        SignalRepository(database_path).insert(signal)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

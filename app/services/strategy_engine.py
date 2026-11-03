@@ -16,6 +16,29 @@ M5_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
+class SignalEvidence:
+    """Immutable audit snapshot of the values used for one signal."""
+
+    current_open: float
+    current_high: float
+    current_low: float
+    current_close: float
+    current_candle_timestamp: datetime
+    previous_open: float
+    previous_high: float
+    previous_low: float
+    previous_close: float
+    previous_candle_timestamp: datetime
+    previous_ma75: float
+    previous_rsi7_raw: float
+    previous_rsi7_rounded: float
+    condition_1_passed: bool
+    condition_2_passed: bool
+    condition_3_passed: bool
+    evaluation_timestamp: datetime
+
+
+@dataclass(frozen=True)
 class StrategySignal:
     """A real bullish or bearish strategy result ready for persistence."""
 
@@ -25,6 +48,7 @@ class StrategySignal:
     direction: str
     candle_timestamp: datetime
     status: str = "new"
+    evidence: SignalEvidence | None = None
 
 
 class DayTradingEngulfingStrategy:
@@ -65,23 +89,45 @@ class DayTradingEngulfingStrategy:
         if rounded_rsi is None:
             return None
 
-        bullish = (
-            current.close > previous.open
-            and current.open > previous_indicator.moving_average
-            and rounded_rsi < 40
-        )
+        condition_1_passed = current.close > previous.open
+        condition_2_passed = current.open > previous_indicator.moving_average
+        condition_3_passed = rounded_rsi < 40
+        bearish_condition_1_passed = current.close < previous.open
+        bearish_condition_2_passed = current.open < previous_indicator.moving_average
+        bearish_condition_3_passed = rounded_rsi > 60
+        bullish = condition_1_passed and condition_2_passed and condition_3_passed
         bearish = (
-            current.close < previous.open
-            and current.open < previous_indicator.moving_average
-            and rounded_rsi > 60
+            bearish_condition_1_passed
+            and bearish_condition_2_passed
+            and bearish_condition_3_passed
         )
         if not bullish and not bearish:
             return None
 
+        evidence = SignalEvidence(
+            current_open=current.open,
+            current_high=current.high,
+            current_low=current.low,
+            current_close=current.close,
+            current_candle_timestamp=current.timestamp.astimezone(UTC),
+            previous_open=previous.open,
+            previous_high=previous.high,
+            previous_low=previous.low,
+            previous_close=previous.close,
+            previous_candle_timestamp=previous.timestamp.astimezone(UTC),
+            previous_ma75=previous_indicator.moving_average,
+            previous_rsi7_raw=previous_indicator.rsi,
+            previous_rsi7_rounded=rounded_rsi,
+            condition_1_passed=condition_1_passed if bullish else bearish_condition_1_passed,
+            condition_2_passed=condition_2_passed if bullish else bearish_condition_2_passed,
+            condition_3_passed=condition_3_passed if bullish else bearish_condition_3_passed,
+            evaluation_timestamp=reference_now,
+        )
         return StrategySignal(
             market=MARKET,
             strategy=STRATEGY_NAME,
             timeframe=TIMEFRAME,
             direction="bullish" if bullish else "bearish",
             candle_timestamp=current_time.astimezone(UTC),
+            evidence=evidence,
         )

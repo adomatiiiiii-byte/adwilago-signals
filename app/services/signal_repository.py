@@ -18,9 +18,10 @@ class SignalRepository:
         self.database_path = database_path
 
     def insert(self, signal: StrategySignal) -> bool:
-        """Insert a signal, returning False when the unique key already exists."""
+        """Insert a signal and its audit evidence in one transaction."""
         self.database_path.parent.mkdir(exist_ok=True)
         with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO signals
@@ -35,7 +36,42 @@ class SignalRepository:
                     signal.status,
                 ),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                return False
+            if signal.evidence is not None:
+                evidence = signal.evidence
+                connection.execute(
+                    """
+                    INSERT INTO signal_evidence (
+                        signal_id, current_open, current_high, current_low, current_close,
+                        current_candle_timestamp, previous_open, previous_high, previous_low,
+                        previous_close, previous_candle_timestamp, previous_ma75,
+                        previous_rsi7_raw, previous_rsi7_rounded, condition_1_passed,
+                        condition_2_passed, condition_3_passed, evaluation_timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cursor.lastrowid,
+                        evidence.current_open,
+                        evidence.current_high,
+                        evidence.current_low,
+                        evidence.current_close,
+                        evidence.current_candle_timestamp.isoformat().replace("+00:00", "Z"),
+                        evidence.previous_open,
+                        evidence.previous_high,
+                        evidence.previous_low,
+                        evidence.previous_close,
+                        evidence.previous_candle_timestamp.isoformat().replace("+00:00", "Z"),
+                        evidence.previous_ma75,
+                        evidence.previous_rsi7_raw,
+                        evidence.previous_rsi7_rounded,
+                        int(evidence.condition_1_passed),
+                        int(evidence.condition_2_passed),
+                        int(evidence.condition_3_passed),
+                        evidence.evaluation_timestamp.isoformat().replace("+00:00", "Z"),
+                    ),
+                )
+            return True
 
     def list_recent(self, limit: int = 50) -> list[dict[str, object]]:
         """Return persisted signals newest first without changing the database."""
