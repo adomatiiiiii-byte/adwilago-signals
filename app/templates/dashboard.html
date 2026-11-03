@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADWILAGO Trading Signals</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand-mark">A</div>
+            <div class="brand-copy">
+                <p class="eyebrow">Market intelligence</p>
+                <h1>ADWILAGO</h1>
+                <span>TRADING SIGNALS</span>
+            </div>
+            <nav aria-label="Primary navigation">
+                <a class="nav-item active" href="#dashboard"><span>◈</span> Dashboard</a>
+                <a class="nav-item" href="#history"><span>≡</span> Signal History</a>
+                <a class="nav-item" href="#strategy"><span>⌘</span> Strategy Settings</a>
+                <a class="nav-item" href="#system"><span>◉</span> System Status</a>
+            </nav>
+            <div class="sidebar-foot">
+                <span class="status-dot muted"></span>
+                <span>Manual execution only</span>
+            </div>
+        </aside>
+
+        <main class="main-content" id="dashboard">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">Workspace / Dashboard</p>
+                    <h2>Market overview</h2>
+                </div>
+                <div class="topbar-meta">
+                    <div class="clock-block"><span>LOCAL TIME</span><strong id="current-time">--:--:--</strong></div>
+                    <div class="app-status"><span id="app-status-dot" class="status-dot muted"></span><span id="app-status-text">Market data disconnected</span></div>
+                </div>
+            </header>
+
+            <section class="summary-grid" aria-label="Dashboard summary">
+                <div class="summary-card accent-card"><span class="card-label">Market</span><strong>{{ market }}</strong><small>Primary instrument</small></div>
+                <div class="summary-card"><span class="card-label">Timeframe</span><strong>5m</strong><small>{{ timeframe }} candles</small></div>
+                <div class="summary-card"><span class="card-label">Strategy</span><strong>DayTrading</strong><small>Engulfing</small></div>
+                <div class="summary-card warning-card"><span class="card-label">System status</span><strong id="summary-status">Disconnected</strong><small id="summary-status-detail">Market feed disconnected</small></div>
+            </section>
+
+            <section class="content-grid">
+                <div class="panel market-panel" id="system">
+                    <div class="panel-heading"><div><p class="eyebrow">Connection monitor</p><h3>Market status</h3></div><div><span id="connection-badge" class="badge badge-warning">REST disconnected</span> <span id="websocket-badge" class="badge badge-warning">WS disconnected</span></div></div>
+                    <div class="market-details">
+                        <div><span>Selected market</span><strong>{{ market }}</strong></div>
+                        <div><span>REST candles</span><strong id="connection-detail" class="warning-text"><i class="status-dot muted"></i> Disconnected</strong></div>
+                        <div><span>Tick WebSocket</span><strong id="websocket-detail" class="warning-text"><i class="status-dot muted"></i> Disconnected</strong></div>
+                        <div><span>Current market price</span><strong id="current-price" class="placeholder">—</strong></div>
+                        <div><span>Last candle timestamp</span><strong id="last-candle" class="placeholder">—</strong></div>
+                        <div><span>Last tick timestamp</span><strong id="last-tick" class="placeholder">—</strong></div>
+                        <div><span>Current timeframe</span><strong>{{ timeframe }}</strong></div>
+                        <div><span>Data provider</span><strong id="data-provider">Exness</strong></div>
+                    </div>
+                    <div id="connection-notice" class="notice"><span>ⓘ</span><p>Live market data has not been connected. No price or candle values are being displayed.</p></div>
+                </div>
+
+                <div class="panel signal-panel">
+                    <div class="panel-heading"><div><p class="eyebrow">Strategy engine</p><h3>Current signal</h3></div><span id="current-signal-badge" class="badge badge-neutral">No active signal</span></div>
+                    <div id="current-signal-state" class="signal-state">
+                        <div id="current-signal-icon" class="signal-icon">—</div>
+                        <h4 id="current-signal-title">NO ACTIVE SIGNAL</h4>
+                        <p id="current-signal-description">The latest evaluated completed candle did not produce a confirmed signal.</p>
+                        <div id="current-signal-details" class="signal-details" hidden></div>
+                    </div>
+                    <div class="signal-footer"><span>Execution mode</span><strong>Manual only</strong></div>
+                </div>
+            </section>
+
+            <section class="panel chart-panel">
+                <div class="panel-heading"><div><p class="eyebrow">Price action</p><h3>USDJPY chart</h3></div><span id="chart-badge" class="badge badge-neutral">Waiting for data</span></div>
+                <div id="chart-disclaimer" class="chart-disclaimer">Waiting for genuine Exness market data</div>
+                <div class="indicator-readout" aria-label="Latest completed-candle indicators">
+                    <div><span>Completed MA (75)</span><strong id="latest-ma">—</strong></div>
+                    <div><span>Completed RSI (7)</span><strong id="latest-rsi">—</strong></div>
+                </div>
+                <div id="chart" class="chart-container" aria-label="Empty market chart"><div id="chart-tooltip" class="chart-tooltip" hidden></div></div>
+                <div class="rsi-heading"><span>RSI (7)</span></div>
+                <div id="rsi-chart" class="chart-container rsi-chart-container" aria-label="RSI indicator panel"></div>
+                <div class="chart-legend"><span><i class="legend-line"></i> MA / RSI indicators</span><span><i class="legend-block"></i> Official completed-candle data</span></div>
+            </section>
+
+            <section class="content-grid lower-grid">
+                <div class="panel strategy-panel" id="strategy">
+                    <div class="panel-heading"><div><p class="eyebrow">Configuration reference</p><h3>Strategy information</h3></div></div>
+                    <div class="strategy-title"><span class="strategy-symbol">DE</span><div><strong>{{ strategy }}</strong><span>{{ market }} · {{ timeframe }}</span></div></div>
+                    <div class="indicator-grid">
+                        <div class="indicator"><span>Moving Average</span><strong>Length <b>75</b></strong><small>Source Close · Offset 0</small><small>SMA based on closing prices</small></div>
+                        <div class="indicator"><span>RSI</span><strong>Length <b>7</b></strong><small>Wilder's RMA calculation</small></div>
+                    </div>
+                    <div class="conditions"><div><h4><span class="condition-bull">↑</span> Bullish conditions</h4><ol><li>Current candle close &gt; Previous candle open</li><li>Current candle open &gt; Previous candle MA</li><li>Previous candle RSI &lt; 40</li></ol></div><div><h4><span class="condition-bear">↓</span> Bearish conditions</h4><ol><li>Current candle close &lt; Previous candle open</li><li>Current candle open &lt; Previous candle MA</li><li>Previous candle RSI &gt; 60</li></ol></div></div>
+                </div>
+
+                <div class="panel history-panel" id="history">
+                    <div class="panel-heading"><div><p class="eyebrow">Activity log</p><h3>Signal history</h3></div><span id="signal-history-count" class="badge badge-neutral">0 signals</span></div>
+                    <div class="table-wrap"><table><thead><tr><th>Direction</th><th>Candle timestamp</th><th>Signal price</th><th>Strategy</th><th>Market</th><th>Status</th></tr></thead><tbody id="signal-history-body"><tr><td colspan="6" class="empty-table"><span>⌁</span><strong>No signals generated</strong><small>Only confirmed signals are shown here.</small></td></tr></tbody></table></div>
+                </div>
+            </section>
+            <footer><span>ADWILAGO TRADING SIGNALS · Stage 2 Market Data</span><span id="freshness">Last successful update: —</span><span>For analysis and manual review only · Not financial advice</span></footer>
+        </main>
+    </div>
+    <div id="fixed-kampala-clock" class="fixed-kampala-clock" aria-label="Current Kampala time">
+        <span>EAT · KAMPALA</span>
+        <strong id="fixed-kampala-time">--:--:--</strong>
+    </div>
+    <script src="{{ url_for('static', path='js/dashboard.js') }}"></script>
+</body>
+</html>
