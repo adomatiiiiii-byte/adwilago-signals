@@ -93,6 +93,70 @@ def test_signal_and_evidence_are_persisted_and_survive_repository_restart(tmp_pa
         assert row == (1, 101.0, 105.0, 39.994, 39.99, 1, 1, 1, "2026-11-02T12:00:00Z")
 
 
+def test_persisted_evidence_contains_complete_values_and_stays_associated(tmp_path, monkeypatch):
+    database_path, repository = evidence_repository(tmp_path, monkeypatch)
+    bullish_candles, bullish_indicators = pair()
+    bearish_candles, bearish_indicators = pair(
+        previous_ma=95.0,
+        previous_rsi=60.006,
+        current_open=90.0,
+        current_close=99.0,
+    )
+    shifted_bearish_candles = [
+        Candle(candle_value.timestamp + timedelta(hours=1), candle_value.open, candle_value.high, candle_value.low, candle_value.close, candle_value.volume)
+        for candle_value in bearish_candles
+    ]
+    shifted_bearish_indicators = [
+        IndicatorPoint(point.timestamp + timedelta(hours=1), point.moving_average, point.rsi)
+        for point in bearish_indicators
+    ]
+    strategy = DayTradingEngulfingStrategy()
+    bullish = strategy.evaluate(bullish_candles, bullish_indicators, 1, now=NOW)
+    bearish = strategy.evaluate(shifted_bearish_candles, shifted_bearish_indicators, 1, now=NOW + timedelta(hours=1))
+
+    assert bullish is not None and bearish is not None
+    assert repository.insert(bullish) is True
+    assert repository.insert(bearish) is True
+    records = repository.list_recent()
+    ids_by_direction = {record["direction"]: record["id"] for record in records}
+    bullish_evidence = repository.get_evidence(ids_by_direction["bullish"])
+    bearish_evidence = repository.get_evidence(ids_by_direction["bearish"])
+
+    assert bullish_evidence["signal_id"] == ids_by_direction["bullish"]
+    assert bearish_evidence["signal_id"] == ids_by_direction["bearish"]
+    assert bullish_evidence["signal_id"] != bearish_evidence["signal_id"]
+    assert bullish_evidence["current_open"] == bullish_candles[1].open
+    assert bullish_evidence["current_high"] == bullish_candles[1].high
+    assert bullish_evidence["current_low"] == bullish_candles[1].low
+    assert bullish_evidence["current_close"] == bullish_candles[1].close
+    assert bullish_evidence["current_candle_timestamp"] == "2026-11-02T11:55:00Z"
+    assert bullish_evidence["previous_open"] == bullish_candles[0].open
+    assert bullish_evidence["previous_high"] == bullish_candles[0].high
+    assert bullish_evidence["previous_low"] == bullish_candles[0].low
+    assert bullish_evidence["previous_close"] == bullish_candles[0].close
+    assert bullish_evidence["previous_candle_timestamp"] == "2026-11-02T11:50:00Z"
+    assert bullish_evidence["previous_ma75"] == 105.0
+    assert bullish_evidence["previous_rsi7_raw"] == 39.994
+    assert bullish_evidence["previous_rsi7_rounded"] == 39.99
+    assert (bullish_evidence["condition_1_passed"], bullish_evidence["condition_2_passed"], bullish_evidence["condition_3_passed"]) == (1, 1, 1)
+    assert bullish_evidence["evaluation_timestamp"] == "2026-11-02T12:00:00Z"
+    assert bearish_evidence["previous_rsi7_raw"] == 60.006
+    assert bearish_evidence["previous_rsi7_rounded"] == 60.01
+    assert (bearish_evidence["condition_1_passed"], bearish_evidence["condition_2_passed"], bearish_evidence["condition_3_passed"]) == (1, 1, 1)
+    assert repository.get_evidence(999) is None
+    assert database_path.exists()
+
+
+def test_legacy_signal_remains_without_fabricated_evidence(tmp_path, monkeypatch):
+    _, repository = evidence_repository(tmp_path, monkeypatch)
+    legacy = StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bullish", NOW)
+
+    assert repository.insert(legacy) is True
+    assert repository.get_evidence(1) is None
+    assert repository.get_signal(1)["direction"] == "bullish"
+    assert len(repository.list_recent()) == 1
+
+
 def test_bearish_signal_persists_directional_evidence(tmp_path, monkeypatch):
     _, repository = evidence_repository(tmp_path, monkeypatch)
     candles, indicators = pair(previous_ma=95.0, previous_rsi=60.006, current_open=90.0, current_close=99.0)
