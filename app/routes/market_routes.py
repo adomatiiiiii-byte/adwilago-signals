@@ -1,6 +1,6 @@
 """Dashboard market-data API routes."""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.services.exness_service import ExnessError, ExnessMarketDataService
 from app.services.signal_repository import SignalRepository
@@ -60,6 +60,22 @@ async def market_data() -> dict:
 async def signals() -> dict:
     """Read current signal state and persisted history without market refresh."""
     return _signal_snapshot()
+
+
+@router.get("/api/signals/{signal_id}/evidence")
+async def signal_evidence(signal_id: int) -> dict:
+    """Read saved audit evidence for one signal without recalculating it."""
+    signal = signal_repository.get_signal(signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+    evidence = signal_repository.get_evidence(signal_id)
+    if evidence is not None:
+        return {"signal_id": signal_id, "available": True, "signal": signal, "evidence": evidence}
+    return {
+        "signal_id": signal_id,
+        "available": False,
+        "message": "Historical evidence unavailable",
+    }
 
 
 @router.websocket("/ws/market-data")

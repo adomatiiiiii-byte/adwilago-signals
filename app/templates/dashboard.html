@@ -109,8 +109,12 @@
 
                 <div class="panel history-panel" id="history">
                     <div class="panel-heading"><div><p class="eyebrow">Activity log</p><h3>Signal history</h3></div><span id="signal-history-count" class="badge badge-neutral">0 signals</span></div>
-                    <div class="table-wrap"><table><thead><tr><th>Direction</th><th>Candle timestamp</th><th>Signal price</th><th>Strategy</th><th>Market</th><th>Status</th></tr></thead><tbody id="signal-history-body"><tr><td colspan="6" class="empty-table"><span>⌁</span><strong>No signals generated</strong><small>Only confirmed signals are shown here.</small></td></tr></tbody></table></div>
+                    <div class="table-wrap"><table><thead><tr><th>Direction</th><th>Candle timestamp</th><th>Signal price</th><th>Strategy</th><th>Market</th><th>Status</th><th>Evidence</th></tr></thead><tbody id="signal-history-body"><tr><td colspan="7" class="empty-table"><span>⌁</span><strong>No signals generated</strong><small>Only confirmed signals are shown here.</small></td></tr></tbody></table></div>
                 </div>
+            </section>
+            <section class="panel evidence-panel" id="signal-evidence" aria-live="polite">
+                <div class="panel-heading"><div><p class="eyebrow">Read-only audit record</p><h3>Historical signal evidence</h3></div><span id="evidence-status" class="badge badge-neutral">Select a signal</span></div>
+                <div id="signal-evidence-content" class="evidence-content"><p class="evidence-placeholder">Select Inspect beside a Main History signal to view its saved evaluation evidence.</p></div>
             </section>
             <footer><span>ADWILAGO TRADING SIGNALS · Stage 2 Market Data</span><span id="freshness">Last successful update: —</span><span>For analysis and manual review only · Not financial advice</span></footer>
         </main>
@@ -119,6 +123,6 @@
         <span>EAT · KAMPALA</span>
         <strong id="fixed-kampala-time">--:--:--</strong>
     </div>
-    <script src="{{ url_for('static', path='js/dashboard.js') }}?v=stage-4-5"></script>
+    <script src="{{ url_for('static', path='js/dashboard.js') }}?v=stage-4-6b"></script>
 </body>
 </html>

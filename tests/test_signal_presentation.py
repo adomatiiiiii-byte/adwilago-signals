@@ -3,6 +3,8 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from app.routes import market_routes
 from app.services.exness_service import Candle, ExnessConfig, ExnessMarketDataService
 from app.services.indicators import IndicatorPoint
@@ -22,6 +24,22 @@ def isolated_repository(tmp_path: Path) -> SignalRepository:
         )
         connection.execute(
             "CREATE UNIQUE INDEX ux_signals ON signals (market, strategy, candle_timestamp)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE signal_evidence (
+                signal_id INTEGER PRIMARY KEY,
+                current_open REAL NOT NULL, current_high REAL NOT NULL,
+                current_low REAL NOT NULL, current_close REAL NOT NULL,
+                current_candle_timestamp TEXT NOT NULL,
+                previous_open REAL NOT NULL, previous_high REAL NOT NULL,
+                previous_low REAL NOT NULL, previous_close REAL NOT NULL,
+                previous_candle_timestamp TEXT NOT NULL, previous_ma75 REAL NOT NULL,
+                previous_rsi7_raw REAL NOT NULL, previous_rsi7_rounded REAL NOT NULL,
+                condition_1_passed INTEGER NOT NULL, condition_2_passed INTEGER NOT NULL,
+                condition_3_passed INTEGER NOT NULL, evaluation_timestamp TEXT NOT NULL
+            )
+            """
         )
     return SignalRepository(database_path)
 
@@ -143,6 +161,54 @@ def test_missing_optional_history_price_is_safe(tmp_path):
     assert history[0]["price"] is None
 
 
+def test_signal_evidence_endpoint_returns_saved_evidence_without_writing(tmp_path):
+    repository = isolated_repository(tmp_path)
+    signal_id = repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bullish", BASE_TIME))
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "INSERT INTO signal_evidence (signal_id, current_open, current_high, current_low, current_close, current_candle_timestamp, previous_open, previous_high, previous_low, previous_close, previous_candle_timestamp, previous_ma75, previous_rsi7_raw, previous_rsi7_rounded, condition_1_passed, condition_2_passed, condition_3_passed, evaluation_timestamp) VALUES (1, 153.427, 153.500, 153.300, 153.480, '2026-11-02T08:05:00Z', 153.400, 153.450, 153.200, 153.420, '2026-11-02T08:00:00Z', 153.410, 39.994, 39.99, 1, 1, 1, '2026-11-02T08:10:00Z')"
+        )
+    original_rows = repository.list_recent()
+    market_routes.signal_repository = repository
+    try:
+        response = asyncio.run(market_routes.signal_evidence(1))
+    finally:
+        market_routes.signal_repository = SignalRepository()
+
+    assert response["available"] is True
+    assert response["signal"]["id"] == 1
+    assert response["signal"]["direction"] == "bullish"
+    assert response["evidence"]["current_close"] == 153.48
+    assert response["evidence"]["previous_rsi7_rounded"] == 39.99
+    assert repository.list_recent() == original_rows
+
+
+def test_signal_evidence_endpoint_returns_unavailable_for_legacy_signal(tmp_path):
+    repository = isolated_repository(tmp_path)
+    repository.insert(StrategySignal("USDJPY", "DayTrading Engulfing", "M5", "bearish", BASE_TIME))
+    market_routes.signal_repository = repository
+    try:
+        response = asyncio.run(market_routes.signal_evidence(1))
+    finally:
+        market_routes.signal_repository = SignalRepository()
+
+    assert response == {"signal_id": 1, "available": False, "message": "Historical evidence unavailable"}
+
+
+def test_signal_evidence_endpoint_rejects_unknown_signal(tmp_path):
+    from fastapi import HTTPException
+
+    repository = isolated_repository(tmp_path)
+    market_routes.signal_repository = repository
+    try:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(market_routes.signal_evidence(999))
+    finally:
+        market_routes.signal_repository = SignalRepository()
+
+    assert error.value.status_code == 404
+
+
 def test_signal_details_are_linked_to_previous_indicator_values(tmp_path):
     repository = isolated_repository(tmp_path)
     service = service_with(repository)
@@ -218,3 +284,7 @@ def test_frontend_signal_presentation_uses_kampala_and_backend_signal_fields():
     assert "TODAY'S SIGNALS | 07:00 AM" in template
     assert 'id="today-signals-body"' in template
     assert 'id="signal-history-body"' in template
+    assert "/api/signals/${encodeURIComponent(signalId)}/evidence" in javascript
+    assert "signal-evidence-button" in javascript
+    assert "Historical evidence unavailable" in javascript
+    assert 'id="signal-evidence-content"' in template

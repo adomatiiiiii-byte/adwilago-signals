@@ -132,6 +132,13 @@ function formatTimestamp(timestamp) {
     }).format(new Date(timestamp));
 }
 
+function formatUtcTimestamp(timestamp) {
+    if (!timestamp) return "--";
+    return new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
+    }).format(new Date(timestamp));
+}
+
 function setConnectionState(data) {
     const connected = data.status === "connected";
     const error = data.rest_status === "error" || data.status === "error";
@@ -260,7 +267,7 @@ function updateSignalPresentation(data) {
     const history = Array.isArray(data.signal_history) ? data.signal_history : [];
     count.textContent = `${history.length} signal${history.length === 1 ? "" : "s"}`;
     if (history.length === 0) {
-        body.innerHTML = `<tr><td colspan="6" class="empty-table"><span>⌁</span><strong>No signals generated</strong><small>Only confirmed signals are shown here.</small></td></tr>`;
+        body.innerHTML = `<tr><td colspan="7" class="empty-table"><span>⌁</span><strong>No signals generated</strong><small>Only confirmed signals are shown here.</small></td></tr>`;
         return;
     }
     body.innerHTML = history.map((record) => {
@@ -272,8 +279,86 @@ function updateSignalPresentation(data) {
             <td>${escapeHtml(record.strategy)}</td>
             <td>${escapeHtml(record.market)}</td>
             <td>${escapeHtml(record.status)}</td>
+            <td><button type="button" class="signal-evidence-button" data-signal-id="${Number(record.id)}">Inspect</button></td>
         </tr>`;
     }).join("");
+}
+
+function renderEvidenceUnavailable(message) {
+    const status = document.getElementById("evidence-status");
+    const content = document.getElementById("signal-evidence-content");
+    if (!status || !content) return;
+    status.textContent = "Unavailable";
+    status.className = "badge badge-warning";
+    content.innerHTML = `<p class="evidence-placeholder">${escapeHtml(message)}</p>`;
+}
+
+function renderSignalEvidence(payload) {
+    const status = document.getElementById("evidence-status");
+    const content = document.getElementById("signal-evidence-content");
+    if (!status || !content) return;
+    if (!payload.available || !payload.evidence) {
+        renderEvidenceUnavailable(payload.message || "Historical evidence unavailable");
+        return;
+    }
+    const evidence = payload.evidence;
+    const signal = payload.signal || {};
+    const bullish = signal.direction === "bullish";
+    const direction = bullish ? "BULLISH" : "BEARISH";
+    const conditions = bullish
+        ? [
+            `Current close ${formatPrice(evidence.current_close)} > previous open ${formatPrice(evidence.previous_open)}`,
+            `Current open ${formatPrice(evidence.current_open)} > previous SMA75 ${formatPrice(evidence.previous_ma75)}`,
+            `Previous RSI7 rounded ${Number(evidence.previous_rsi7_rounded).toFixed(2)} < 40`,
+        ]
+        : [
+            `Current close ${formatPrice(evidence.current_close)} < previous open ${formatPrice(evidence.previous_open)}`,
+            `Current open ${formatPrice(evidence.current_open)} < previous SMA75 ${formatPrice(evidence.previous_ma75)}`,
+            `Previous RSI7 rounded ${Number(evidence.previous_rsi7_rounded).toFixed(2)} > 60`,
+        ];
+    const passed = [evidence.condition_1_passed, evidence.condition_2_passed, evidence.condition_3_passed];
+    status.textContent = `${direction} evidence`;
+    status.className = `badge ${bullish ? "badge-bullish" : "badge-bearish"}`;
+    content.innerHTML = `
+        <div class="evidence-summary"><div><span>Signal direction</span><strong>${direction}</strong></div><div><span>Signal timestamp</span><strong>${escapeHtml(formatTimestamp(signal.candle_timestamp))} Kampala</strong></div><div><span>Evaluation timestamp</span><strong>${escapeHtml(formatUtcTimestamp(evidence.evaluation_timestamp))} UTC</strong></div></div>
+        <div class="evidence-columns">
+            <div><h4>Current completed candle</h4><p>Timestamp: ${escapeHtml(formatTimestamp(evidence.current_candle_timestamp))} Kampala</p><p>O ${formatPrice(evidence.current_open)} · H ${formatPrice(evidence.current_high)} · L ${formatPrice(evidence.current_low)} · C ${formatPrice(evidence.current_close)}</p></div>
+            <div><h4>Previous completed candle</h4><p>Timestamp: ${escapeHtml(formatTimestamp(evidence.previous_candle_timestamp))} Kampala</p><p>O ${formatPrice(evidence.previous_open)} · H ${formatPrice(evidence.previous_high)} · L ${formatPrice(evidence.previous_low)} · C ${formatPrice(evidence.previous_close)}</p></div>
+            <div><h4>Previous candle indicators</h4><p>SMA75: ${formatPrice(evidence.previous_ma75)}</p><p>RSI7 raw: ${escapeHtml(String(evidence.previous_rsi7_raw))}</p><p>RSI7 rounded: ${Number(evidence.previous_rsi7_rounded).toFixed(2)}</p></div>
+        </div>
+        <div class="evidence-conditions"><h4>${direction} conditions</h4><ol>${conditions.map((condition, index) => `<li><span>${escapeHtml(condition)}</span><strong class="${passed[index] ? "condition-pass" : "condition-fail"}">${passed[index] ? "PASSED" : "FAILED"}</strong></li>`).join("")}</ol></div>`;
+}
+
+let evidenceRequestNumber = 0;
+async function loadSignalEvidence(signalId) {
+    const status = document.getElementById("evidence-status");
+    const content = document.getElementById("signal-evidence-content");
+    if (!status || !content) return;
+    const requestNumber = ++evidenceRequestNumber;
+    status.textContent = "Loading...";
+    status.className = "badge badge-neutral";
+    content.innerHTML = "<p class=\"evidence-placeholder\">Loading saved evidence...</p>";
+    try {
+        const response = await fetch(`/api/signals/${encodeURIComponent(signalId)}/evidence`, { cache: "no-store" });
+        const payload = await response.json();
+        if (requestNumber !== evidenceRequestNumber) return;
+        if (!response.ok) throw new Error(payload.detail || "Evidence could not be retrieved.");
+        renderSignalEvidence(payload);
+    } catch (error) {
+        if (requestNumber !== evidenceRequestNumber) return;
+        status.textContent = "Error";
+        status.className = "badge badge-error";
+        content.innerHTML = `<p class="evidence-placeholder">${escapeHtml(error.message || "Evidence could not be retrieved.")}</p>`;
+    }
+}
+
+function initializeEvidenceSelection() {
+    const body = document.getElementById("signal-history-body");
+    if (!body) return;
+    body.addEventListener("click", (event) => {
+        const button = event.target.closest(".signal-evidence-button");
+        if (button) loadSignalEvidence(button.dataset.signalId);
+    });
 }
 
 function updateMainChartData(candles, points) {
@@ -375,6 +460,7 @@ function connectDashboardStream() {
 
 initializeClock();
 createChart();
+initializeEvidenceSelection();
 loadMarketData();
 loadSignalData();
 connectDashboardStream();

@@ -89,6 +89,47 @@ class SignalRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def signal_exists(self, signal_id: int) -> bool:
+        """Return whether a persisted signal exists without changing it."""
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM signals WHERE id = ?",
+                (signal_id,),
+            ).fetchone()
+        return row is not None
+
+    def get_signal(self, signal_id: int) -> dict[str, object] | None:
+        """Return one persisted signal identity without changing it."""
+        with sqlite3.connect(self.database_path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT id, market, strategy, direction, candle_timestamp, status
+                FROM signals
+                WHERE id = ?
+                """,
+                (signal_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_evidence(self, signal_id: int) -> dict[str, object] | None:
+        """Return saved evidence for one signal, or None when unavailable."""
+        with sqlite3.connect(self.database_path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT signal_id, current_open, current_high, current_low, current_close,
+                       current_candle_timestamp, previous_open, previous_high, previous_low,
+                       previous_close, previous_candle_timestamp, previous_ma75,
+                       previous_rsi7_raw, previous_rsi7_rounded, condition_1_passed,
+                       condition_2_passed, condition_3_passed, evaluation_timestamp
+                FROM signal_evidence
+                WHERE signal_id = ?
+                """,
+                (signal_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_today_session(
         self,
         now: datetime | None = None,
