@@ -31,10 +31,51 @@ pip install -r requirements.txt
 Start the development server:
 
 ```powershell
-uvicorn app.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
 ```
 
-Open <http://127.0.0.1:8000> in a browser. The first server start creates `data/signals.db` with an empty `signals` table for a later stage.
+Open <http://127.0.0.1:8080> in a browser. The application uses the configured `data/signals.db`; preserve this database and its history during maintenance.
+
+### Daily production startup
+
+Use one PowerShell terminal opened from an ordinary, user-launched VS Code session. Do not start production from Codex's managed execution terminal: that environment was observed to provide process-level proxy variables pointing to a loopback endpoint that refused connections. Automatic reload is intentionally disabled for normal operation so one strategy engine runs in one server process:
+
+```powershell
+Set-Location "F:\adwilago trading signals"
+Remove-Item Env:SSLKEYLOGFILE -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+```
+
+Keep that terminal open. The server is restricted to this laptop at `127.0.0.1:8080`. Press `Ctrl+C` in the same terminal to shut it down gracefully; wait for the application shutdown-complete message before closing the terminal. Before restarting, verify that port 8080 has been released with the listener check below. Restarting the application invalidates in-memory login sessions, so sign in again afterward.
+
+The proxy diagnosis found `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` in the Codex-managed process environment, targeting `127.0.0.1:9`; no service was listening there. Windows user and machine proxy environment variables were unset, WinINet proxying was disabled, and WinHTTP was configured for direct access. The ordinary VS Code PowerShell terminal reported all 12 upper- and lowercase proxy variables unset, and market connectivity recovered when the application was started there. The precise mechanism that supplied the managed process variables was not established. Do not disable proxy, antivirus, or TLS security controls based on this observation.
+
+If login succeeds but the chart is blank and REST or tick status reports an error, authentication may be working while upstream Exness connectivity is failing. Check the authenticated market-data status and server logs separately. The market-data API can return HTTP 200 with an error status in its JSON payload, so HTTP status alone does not establish market-data health. A login rejection is a separate local authentication issue.
+
+### Development startup with reload
+
+For code development only, use:
+
+```powershell
+Set-Location "F:\adwilago trading signals"
+Remove-Item Env:SSLKEYLOGFILE -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
+```
+
+On this laptop’s Python 3.15.2 and Uvicorn 0.34.0, the managed execution terminal reported `PermissionError: [WinError 5]` while Python’s Windows multiprocessing resource-sharing code created a named pipe. The application worker still served requests, but the reload supervisor emitted repeated errors. Use the daily no-reload command for reliable operation; if reload is needed, run it in an interactive VS Code PowerShell terminal and confirm startup completes without those errors.
+
+### Check whether the server is running
+
+```powershell
+$listeners = Get-NetTCPConnection -State Listen -LocalPort 8080 -ErrorAction SilentlyContinue
+if ($listeners) {
+    $listeners | Select-Object LocalAddress, LocalPort, OwningProcess
+} else {
+    "Adwilago is not listening on port 8080."
+}
+```
+
+For the local-only configuration, `LocalAddress` should be `127.0.0.1`. If a listener already exists, do not start another application instance. Stop the one in its terminal with `Ctrl+C` first.
 
 ## Configure Exness locally
 

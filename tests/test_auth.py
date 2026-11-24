@@ -252,6 +252,22 @@ def test_session_expiry_is_enforced_for_http_requests():
     assert response.status_code == 401
 
 
+def test_sessions_are_invalidated_when_application_instance_restarts():
+    first_instance = make_app()
+    with TestClient(first_instance, base_url=LOCAL_ORIGIN) as client:
+        assert login(client).status_code == 303
+        session_id = client.cookies.get(SESSION_COOKIE_NAME)
+        assert session_id
+
+    restarted_instance = make_app()
+    with TestClient(restarted_instance, base_url=LOCAL_ORIGIN) as client:
+        response = client.get(
+            "/api/signals",
+            headers={"cookie": f"{SESSION_COOKIE_NAME}={session_id}"},
+        )
+    assert response.status_code == 401
+
+
 def test_websocket_requires_session_and_valid_origin(monkeypatch, dashboard_test_app):
     service = FakeMarketService()
     monkeypatch.setattr(market_routes, "service", service)
