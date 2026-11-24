@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -226,7 +227,11 @@ class ExnessMarketDataService:
     ) -> None:
         self.config = config
         self._private_key = _private_key_from_value(config.private_key)
-        self._http = http_client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS)
+        self._ssl_context = ssl.create_default_context()
+        self._http = http_client or httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            verify=self._ssl_context,
+        )
         self._owns_http = http_client is None
         self._access_point: str | None = None
         self._instruments: tuple[str, ...] | None = None
@@ -951,6 +956,7 @@ class ExnessMarketDataService:
                 ws_url = access_point.replace("https://", "wss://", 1) + path
                 async with self._websocket_connector(
                     ws_url,
+                    ssl=self._ssl_context,
                     additional_headers=headers,
                     subprotocols=["exness-ws-protocol"],
                     ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,

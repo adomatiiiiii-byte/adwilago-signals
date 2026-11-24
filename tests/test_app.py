@@ -61,6 +61,32 @@ def service_with(handler=response_for) -> ExnessMarketDataService:
     return ExnessMarketDataService(config(), http_client=client)
 
 
+def test_exness_rest_client_uses_verified_system_context_without_global_change(monkeypatch):
+    real_async_client = httpx.AsyncClient
+    captured = {}
+
+    def capture_client(*, timeout, verify):
+        captured["verify"] = verify
+        return real_async_client(timeout=timeout, verify=verify)
+
+    monkeypatch.setattr(exness_module.httpx, "AsyncClient", capture_client)
+    service = ExnessMarketDataService(config())
+    context = captured["verify"]
+    unrelated_client = real_async_client()
+    unrelated_context = unrelated_client._transport._pool._ssl_context
+
+    assert context is service._ssl_context
+    assert context.verify_mode == exness_module.ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert service._http._transport._pool._ssl_context is context
+    assert unrelated_context is not context
+    assert unrelated_context.verify_mode == exness_module.ssl.CERT_REQUIRED
+    assert unrelated_context.check_hostname is True
+
+    asyncio.run(service.close())
+    asyncio.run(unrelated_client.aclose())
+
+
 def test_missing_credentials_are_rejected_without_values():
     with pytest.raises(Exception) as caught:
         ExnessConfig.from_mapping({"EXN_API_KEY": "", "EXN_PRIVATE_KEY": ""})
@@ -284,6 +310,9 @@ def test_websocket_tick_updates_price_and_resubscribes_after_reconnect():
     assert len(used_connections) == 2
     assert all(connection.sent[0]["subscribe"]["instruments"] == ["USDJPY"] for connection in used_connections)
     assert all(connection.connector_kwargs["subprotocols"] == ["exness-ws-protocol"] for connection in used_connections)
+    assert all(connection.connector_kwargs["ssl"] is service._ssl_context for connection in used_connections)
+    assert service._ssl_context.verify_mode == exness_module.ssl.CERT_REQUIRED
+    assert service._ssl_context.check_hostname is True
     asyncio.run(service.close())
 
 
