@@ -1,5 +1,8 @@
 """Dashboard market-data API routes."""
 
+import asyncio
+import time
+
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.services.exness_service import ExnessError, ExnessMarketDataService
@@ -108,6 +111,10 @@ async def signal_evidence(signal_id: int) -> dict:
 
 @router.websocket("/ws/market-data")
 async def market_data_stream(websocket: WebSocket) -> None:
+    session = websocket.scope.get("state", {}).get("auth_session")
+    if session is None:
+        await websocket.close(code=4401, reason="Authentication required.")
+        return
     await websocket.accept()
     if service is None:
         await websocket.send_json({"type": "status", "status": "disconnected", "error": "Exness market-data service is not configured."})
@@ -119,7 +126,33 @@ async def market_data_stream(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "snapshot", **await service.get_snapshot()})
         service.start_tick_stream()
         while True:
-            await websocket.send_json(await queue.get())
+            queue_task = asyncio.create_task(queue.get())
+            revoked_task = asyncio.create_task(session.revoked.wait())
+            disconnect_task = asyncio.create_task(websocket.receive())
+            remaining = max(0.0, session.expires_at - time.monotonic())
+            done, pending = await asyncio.wait(
+                {queue_task, revoked_task, disconnect_task},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if not done:
+                await websocket.close(code=4401, reason="Session expired.")
+                break
+            if revoked_task in done:
+                await websocket.close(code=4401, reason="Session revoked.")
+                break
+            if disconnect_task in done:
+                if disconnect_task.result().get("type") == "websocket.disconnect":
+                    break
+                continue
+            if time.monotonic() >= session.expires_at:
+                await websocket.close(code=4401, reason="Session expired.")
+                break
+            await websocket.send_json(queue_task.result())
     except WebSocketDisconnect:
         pass
     finally:

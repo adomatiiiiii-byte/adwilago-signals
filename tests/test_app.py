@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +11,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from app.services import exness_service as exness_module
 
-from app.main import app
 from app.routes import market_routes
 from app.services.exness_service import (
     Candle,
@@ -199,7 +199,7 @@ def test_dashboard_route_requests_a_rest_refresh_each_time():
         market_routes.configure_market_service(None)
 
 
-def test_dashboard_websocket_stream_sends_snapshot_without_credentials():
+def test_dashboard_websocket_stream_sends_snapshot_with_authenticated_session(dashboard_test_app):
     class FakeDashboardService:
         def __init__(self):
             self.queue = asyncio.Queue()
@@ -219,8 +219,24 @@ def test_dashboard_websocket_stream_sends_snapshot_without_credentials():
     fake = FakeDashboardService()
     market_routes.configure_market_service(fake)
     try:
-        with TestClient(app) as client:
-            with client.websocket_connect("/ws/market-data") as websocket:
+        with TestClient(dashboard_test_app, base_url="http://127.0.0.1:8080") as client:
+            login_response = client.get("/login")
+            csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', login_response.text).group(1)
+            login_response = client.post(
+                "/login",
+                data={"csrf_token": csrf_token, "password": "isolated-auth-test-password-2026"},
+                headers={"origin": "http://127.0.0.1:8080"},
+                follow_redirects=False,
+            )
+            assert login_response.status_code == 303
+            with client.websocket_connect(
+                "/ws/market-data",
+                headers={
+                    "origin": "http://127.0.0.1:8080",
+                    "host": "127.0.0.1:8080",
+                    "cookie": f"adwilago_session={client.cookies.get('adwilago_session')}",
+                },
+            ) as websocket:
                 payload = websocket.receive_json()
                 assert payload["type"] == "snapshot"
                 assert payload["market"] == "USDJPY"
@@ -228,8 +244,17 @@ def test_dashboard_websocket_stream_sends_snapshot_without_credentials():
         market_routes.configure_market_service(None)
 
 
-def test_dashboard_loads_with_stage_one_state():
-    with TestClient(app) as client:
+def test_dashboard_loads_with_stage_one_state(dashboard_test_app):
+    with TestClient(dashboard_test_app, base_url="http://127.0.0.1:8080") as client:
+        login_response = client.get("/login")
+        csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', login_response.text).group(1)
+        login_response = client.post(
+            "/login",
+            data={"csrf_token": csrf_token, "password": "isolated-auth-test-password-2026"},
+            headers={"origin": "http://127.0.0.1:8080"},
+            follow_redirects=False,
+        )
+        assert login_response.status_code == 303
         response = client.get("/")
 
     assert response.status_code == 200
