@@ -1,0 +1,50 @@
+# TEMPLATE ONLY. Do not run directly.
+# A future per-user launcher must validate the active private Android hotspot,
+# its interface, laptop IPv4 and phone source IPv4 before setting these process
+# environment variables. Missing or unverified values must abort startup.
+#
+# Required process environment:
+#   ADWILAGO_LAPTOP_IPV4       Verified laptop hotspot IPv4 (single address)
+#   ADWILAGO_PHONE_IPV4        Verified phone direct-peer IPv4 (single address)
+#   ADWILAGO_CADDY_STORAGE    Absolute path outside this repository
+#   ADWILAGO_CADDY_LOG_FILE   Absolute access-log path outside this repository
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	storage file_system "{$ADWILAGO_CADDY_STORAGE}"
+	servers {
+		protocols h1 h2
+		strict_sni_host on
+	}
+}
+
+https://{$ADWILAGO_LAPTOP_IPV4}:8443 {
+	# Bind only to the verified hotspot address; never use 0.0.0.0 or a wildcard.
+	bind {$ADWILAGO_LAPTOP_IPV4}
+
+	# remote_ip checks the actual TCP peer. No trusted proxy is configured here.
+	@verified_phone remote_ip {$ADWILAGO_PHONE_IPV4}
+
+	handle @verified_phone {
+		reverse_proxy 127.0.0.1:8080 {
+			# Caddy regenerates its X-Forwarded-* values and ignores client-supplied
+			# values by default. Strip the non-standard/standard forwarded fields
+			# which Caddy does not need to pass through.
+			header_up -Forwarded
+			header_up -X-Real-IP
+		}
+	}
+
+	# Deny every other direct peer; do not provide a catch-all proxy route.
+	handle {
+		respond "Forbidden" 403
+	}
+
+	log {
+		output file "{$ADWILAGO_CADDY_LOG_FILE}"
+		format json
+	}
+
+	tls internal
+}

@@ -1,0 +1,6 @@
+# Machine-specific active configuration and all local CA/storage artifacts.
+Caddyfile
+data/
+*.key
+*.pem
+*.crt
